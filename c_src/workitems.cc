@@ -52,6 +52,24 @@ static ERL_NIF_TERM slice_to_binary(ErlNifEnv* env, leveldb::Slice s)
 
 namespace eleveldb {
 
+    Signal::Signal() : lock(), cv(&lock), signal(false) { }
+    Signal::~Signal() { }
+
+    void Signal::Set() {
+        lock.Lock();
+        signal = true;
+        cv.SignalAll();
+        lock.Unlock();
+    }
+
+    void Signal::Wait(bool clear) {
+        lock.Lock();
+        while (!signal) {
+            cv.Wait();
+        }
+        if (clear) signal = false;
+        lock.Unlock();
+    }
 
 /**
  * WorkTask functions
@@ -59,7 +77,7 @@ namespace eleveldb {
 
 
 WorkTask::WorkTask(ErlNifEnv *caller_env, ERL_NIF_TERM& caller_ref)
-    : terms_set(false)
+    : terms_set(false), to_notify(nullptr)
 {
     if (NULL!=caller_env)
     {
@@ -80,7 +98,7 @@ WorkTask::WorkTask(ErlNifEnv *caller_env, ERL_NIF_TERM& caller_ref)
 
 
 WorkTask::WorkTask(ErlNifEnv *caller_env, ERL_NIF_TERM& caller_ref, DbObjectPtr_t & DbPtr)
-    : m_DbPtr(DbPtr), terms_set(false)
+    : m_DbPtr(DbPtr), terms_set(false), to_notify(nullptr)
 {
     if (NULL!=caller_env)
     {
@@ -99,6 +117,9 @@ WorkTask::WorkTask(ErlNifEnv *caller_env, ERL_NIF_TERM& caller_ref, DbObjectPtr_
 
 }   // WorkTask::WorkTask
 
+void WorkTask::SetToNotify(Signal * signal) {
+    to_notify = signal;
+}
 
 WorkTask::~WorkTask()
 {
@@ -135,6 +156,10 @@ WorkTask::operator()()
                                                          result.result());
 
             enif_send(0, &pid, this->local_env(), result_tuple);
+
+            if (to_notify != nullptr) {
+                to_notify->Set();
+            }
         }
     }
 }
@@ -149,11 +174,10 @@ OpenTask::OpenTask(
     ERL_NIF_TERM& _caller_ref,
     const std::string& db_name_,
     leveldb::Options *open_options_)
-    : WorkTask(caller_env, _caller_ref),
-    db_name(db_name_), open_options(open_options_)
+    : WorkTask(caller_env, _caller_ref)
+    , db_name(db_name_), open_options(open_options_)
 {
 }   // OpenTask::OpenTask
-
 
 work_result
 OpenTask::DoWork()

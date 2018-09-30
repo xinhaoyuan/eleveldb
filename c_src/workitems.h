@@ -46,6 +46,20 @@
 
 namespace eleveldb {
 
+class Signal {
+    leveldb::port::Mutex lock;
+    leveldb::port::CondVar cv;
+    bool signal;
+
+  public:
+
+    Signal();
+    ~Signal();
+
+    void Set();
+    void Wait(bool clear = true);
+};
+
 /* Type returned from a work task: */
 typedef basho::async_nif::work_result   work_result;
 
@@ -66,10 +80,14 @@ class WorkTask : public leveldb::ThreadTask
 
     ErlNifPid local_pid;   // maintain for task lifetime (JFW)
 
+    Signal * to_notify;
+
  public:
     WorkTask(ErlNifEnv *caller_env, ERL_NIF_TERM& caller_ref);
 
     WorkTask(ErlNifEnv *caller_env, ERL_NIF_TERM& caller_ref, DbObjectPtr_t & DbPtr);
+
+    void SetToNotify(Signal * signal);
 
     virtual ~WorkTask();
 
@@ -85,6 +103,7 @@ class WorkTask : public leveldb::ThreadTask
     const ERL_NIF_TERM& pid()              { local_env(); return caller_pid_term; }
 
  protected:
+
     // this is the method that does the real work for this task
     virtual work_result DoWork() = 0;
 

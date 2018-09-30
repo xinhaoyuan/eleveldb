@@ -76,6 +76,7 @@ static ErlNifFunc nif_funcs[] =
     {"async_iterator_move", 3, eleveldb::async_iterator_move}
 };
 
+static bool async_but_wait = false;
 
 namespace eleveldb {
 
@@ -631,7 +632,6 @@ async_open(
     eleveldb_priv_data& priv = *static_cast<eleveldb_priv_data *>(enif_priv_data(env));
 
     leveldb::Options *opts = new leveldb::Options;
-
     fold(env, argv[2], parse_open_option, *opts);
 
     opts->fadvise_willneed = priv.m_Opts.m_FadviseWillNeed;
@@ -664,14 +664,27 @@ async_open(
     opts->total_leveldb_mem=use_memory;
     opts->limited_developer_mem=priv.m_Opts.m_LimitedDeveloper;
 
-    eleveldb::WorkTask *work_item = new eleveldb::OpenTask(env, caller_ref,
-                                                              db_name, opts);
+    eleveldb::WorkTask *work_item;
+    Signal * signal = nullptr;
+
+    work_item = new eleveldb::OpenTask(env, caller_ref,
+                                       db_name, opts);
+
+    if (async_but_wait) {
+        signal = new Signal();
+        work_item->SetToNotify(signal);
+    }
 
     if(false == priv.thread_pool.Submit(work_item))
     {
+        if (signal != nullptr) delete signal;
         delete work_item;
         return send_reply(env, caller_ref,
                           enif_make_tuple2(env, eleveldb::ATOM_ERROR, caller_ref));
+    }
+    else if (signal != nullptr) {
+        signal->Wait();
+        delete signal;
     }
 
     return eleveldb::ATOM_OK;
@@ -728,14 +741,25 @@ async_write(
 
     eleveldb::WorkTask* work_item = new eleveldb::WriteTask(env, caller_ref,
                                                             db_ptr, batch, opts);
+    Signal * signal = nullptr;
+
+    if (async_but_wait) {
+        signal = new Signal();
+        work_item->SetToNotify(signal);
+    }
 
     if(false == priv.thread_pool.Submit(work_item))
     {
+        if (signal != nullptr) delete signal;
         // work_item contains "batch" and the delete below gets both memory allocations
         delete work_item;
         return send_reply(env, caller_ref,
                           enif_make_tuple2(env, eleveldb::ATOM_ERROR, caller_ref));
     }   // if
+    else if (signal != nullptr) {
+        signal->Wait();
+        delete signal;
+    }
 
     return eleveldb::ATOM_OK;
 }
@@ -771,15 +795,25 @@ async_get(
 
     eleveldb::WorkTask *work_item = new eleveldb::GetTask(env, caller_ref,
                                                           db_ptr, key_ref, opts);
+    Signal * signal = nullptr;
+    if (async_but_wait) {
+        signal = new Signal();
+        work_item->SetToNotify(signal);
+    }
 
     eleveldb_priv_data& priv = *static_cast<eleveldb_priv_data *>(enif_priv_data(env));
 
     if(false == priv.thread_pool.Submit(work_item))
     {
+        if (signal != nullptr) delete signal;
         delete work_item;
         return send_reply(env, caller_ref,
                           enif_make_tuple2(env, eleveldb::ATOM_ERROR, caller_ref));
     }   // if
+    else if (signal != nullptr) {
+        signal->Wait();
+        delete signal;
+    }
 
     return eleveldb::ATOM_OK;
 
@@ -818,15 +852,25 @@ async_iterator(
 
     eleveldb::WorkTask *work_item = new eleveldb::IterTask(env, caller_ref,
                                                            db_ptr, keys_only, opts);
+    Signal * signal = nullptr;
+    if (async_but_wait) {
+        signal = new Signal();
+        work_item->SetToNotify(signal);
+    }
 
     // Now-boilerplate setup (we'll consolidate this pattern soon, I hope):
     eleveldb_priv_data& priv = *static_cast<eleveldb_priv_data *>(enif_priv_data(env));
 
     if(false == priv.thread_pool.Submit(work_item))
     {
+        if (signal != nullptr) delete signal;
         delete work_item;
         return send_reply(env, caller_ref, enif_make_tuple2(env, ATOM_ERROR, caller_ref));
     }   // if
+    else if (signal != nullptr) {
+        signal->Wait();
+        delete signal;
+    }
 
     return ATOM_OK;
 
@@ -987,6 +1031,11 @@ async_iterator_move(
 
         move_item = new eleveldb::MoveTask(env, caller_ref,
                                            itr_ptr, action);
+        Signal * signal = nullptr;
+        if (async_but_wait) {
+            signal = new Signal();
+            move_item->SetToNotify(signal);
+        }
 
         // prevent deletes during worker loop
         move_item->RefInc();
@@ -1012,10 +1061,15 @@ async_iterator_move(
 
         if(false == priv.thread_pool.Submit(move_item))
         {
+            if (signal != nullptr) delete signal;
             itr_ptr->ReleaseReuseMove();
             itr_ptr->reuse_move=NULL;
             return enif_make_tuple2(env, ATOM_ERROR, caller_ref);
         }   // if
+        else if (signal != nullptr) {
+            signal->Wait();
+            delete signal;
+        }
     }   // if
 
     return ret_term;
@@ -1050,15 +1104,25 @@ async_close(
     {
         eleveldb::WorkTask *work_item = new eleveldb::CloseTask(env, caller_ref,
                                                                 db_ptr);
+        Signal * signal = nullptr;
+        if (async_but_wait) {
+            signal = new Signal();
+            work_item->SetToNotify(signal);
+        }
 
         // Now-boilerplate setup (we'll consolidate this pattern soon, I hope):
         eleveldb_priv_data& priv = *static_cast<eleveldb_priv_data *>(enif_priv_data(env));
 
         if(false == priv.thread_pool.Submit(work_item))
         {
+            if (signal != nullptr) delete signal;
             delete work_item;
             return send_reply(env, caller_ref, enif_make_tuple2(env, ATOM_ERROR, caller_ref));
         }   // if
+        if (signal != nullptr) {
+            signal->Wait();
+            delete signal;
+        }
     }   // if
     else if (!term_ok)
     {
@@ -1098,15 +1162,25 @@ async_iterator_close(
     {
         eleveldb::WorkTask *work_item = new eleveldb::ItrCloseTask(env, caller_ref,
                                                                    itr_ptr);
+        Signal * signal = nullptr;
+        if (async_but_wait) {
+            signal = new Signal();
+            work_item->SetToNotify(signal);
+        }
 
         // Now-boilerplate setup (we'll consolidate this pattern soon, I hope):
         eleveldb_priv_data& priv = *static_cast<eleveldb_priv_data *>(enif_priv_data(env));
 
         if(false == priv.thread_pool.Submit(work_item))
         {
+            if (signal != nullptr) delete signal;
             delete work_item;
             return send_reply(env, caller_ref, enif_make_tuple2(env, ATOM_ERROR, caller_ref));
         }   // if
+        else if (signal != nullptr) {
+            signal->Wait();
+            delete signal;
+        }
     }   // if
 
     // this close/cleanup call is way late ... bad programmer!
@@ -1143,12 +1217,22 @@ async_destroy(
 
     eleveldb::WorkTask *work_item = new eleveldb::DestroyTask(env, caller_ref,
                                                               db_name, opts);
+    Signal * signal = nullptr;
+    if (async_but_wait) {
+        signal = new Signal();
+        work_item->SetToNotify(signal);
+    }
 
     if(false == priv.thread_pool.Submit(work_item))
     {
+        if (signal != nullptr) delete signal;
         delete work_item;
         return send_reply(env, caller_ref,
                           enif_make_tuple2(env, eleveldb::ATOM_ERROR, caller_ref));
+    }
+    else if (signal != nullptr) {
+        signal->Wait();
+        delete signal;
     }
 
     return eleveldb::ATOM_OK;
@@ -1289,6 +1373,10 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 try
 {
     int ret_val;
+
+    if (getenv("ELEVELDB_ASYNC_BUT_WAIT")) {
+        async_but_wait = atoi(getenv("ELEVELDB_ASYNC_BUT_WAIT"));
+    }
 
     ret_val=0;
     *priv_data = NULL;
